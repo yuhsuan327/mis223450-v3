@@ -33,7 +33,7 @@ ROOT_URLCONF = 'system.urls'
 
 LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/logout/'  # 跳到 logout.html 顯示登出成功訊息
-
+LOGIN_URL = '/login/'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',

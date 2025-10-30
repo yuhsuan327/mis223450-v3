@@ -45,7 +45,7 @@ class Student(models.Model):
 class Submission(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE)
     question = models.ForeignKey(Question, on_delete=models.CASCADE)
-    student_answer = models.CharField(max_length=1)
+    student_answer = models.CharField(max_length=200)
     is_correct = models.BooleanField()
     submitted_at = models.DateTimeField(auto_now_add=True)
 

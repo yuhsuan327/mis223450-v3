@@ -1,5 +1,8 @@
 from django.shortcuts import render, redirect, get_object_or_404
-from django.db.models import Count, Q
+from django.db.models import Count, Q , Max
+from django.utils import timezone
+from datetime import timedelta
+from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import login
@@ -10,6 +13,7 @@ from django.views.decorators.http import require_POST
 import json
 from django.views.decorators.csrf import csrf_exempt
 import io, uuid
+from collections import defaultdict
 
 from .models import Lecture, Question, Student, Submission, Course, Profile
 from .forms import (
@@ -363,57 +367,65 @@ def edit_summary(request, lecture_id):
 
 @login_required
 def view_student_report_by_teacher(request, student_id):
+    """教師查看指定學生的綜合報告"""
     student = get_object_or_404(Student, id=student_id)
     submissions = Submission.objects.filter(student=student)
 
-    # 📊 基本統計
     total = submissions.count()
     correct = submissions.filter(is_correct=True).count()
-    wrong_count = total - correct
-    accuracy = round((correct / total * 100), 2) if total else 0
+    accuracy = round(correct / total * 100, 2) if total > 0 else 0
 
-    # ❗ 常錯題（最多五題）
+    # 錯題分析（前5題）
     wrong = (
-        submissions
-        .filter(is_correct=False)
-        .values('question__question_text')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:5]
+        submissions.filter(is_correct=False)
+        .values("question__question_text")
+        .annotate(count=Count("id"))
+        .order_by("-count")[:5]
     )
 
-    # 📈 講次正確率資料
-    stats = (
-        submissions
-        .values('question__lecture__title')
-        .annotate(
-            total=Count('id'),
-            correct=Count('id', filter=Q(is_correct=True))
-        )
-        .order_by('question__lecture__date')
-    )
-    labels = [s['question__lecture__title'] for s in stats]
-    data = [round(s['correct'] / s['total'] * 100, 2) for s in stats]
+    # 各講次統計
+    lecture_stats = defaultdict(lambda: {"total": 0, "correct": 0})
+    for s in submissions:
+        if s.question and s.question.lecture:
+            lec = s.question.lecture.title
+            lecture_stats[lec]["total"] += 1
+            if s.is_correct:
+                lecture_stats[lec]["correct"] += 1
 
-    # 💡 學習建議
-    avg_accuracy = sum(data) / len(data) if data else 0
-    if avg_accuracy < 60:
-        suggestion = "你的整體正確率偏低，建議加強基本練習。"
-    elif avg_accuracy < 85:
-        suggestion = "表現尚可，可針對錯誤單元加強複習。"
+    labels = list(lecture_stats.keys())
+    data = [round(v["correct"] / v["total"] * 100, 2) for v in lecture_stats.values()]
+
+    # 學習建議
+    if accuracy >= 90:
+        suggestion = "表現非常優異，繼續保持！"
+    elif accuracy >= 70:
+        suggestion = "表現良好，建議複習部分錯題章節以鞏固知識。"
+    elif accuracy > 0:
+        if lecture_stats:
+            weakest = min(
+                lecture_stats.items(),
+                key=lambda kv: kv[1]["correct"] / kv[1]["total"],
+            )[0]
+            suggestion = f"建議加強學習「{weakest}」單元，錯題比例較高。"
+        else:
+            suggestion = "請多練習錯誤率高的章節，加強理解。"
     else:
-        suggestion = "表現優異，請持續保持！"
+        suggestion = "目前尚無作答紀錄，請先完成練習題。"
 
-    return render(request, 'progress_report.html', {
-        'student': student,
-        'total': total,
-        'correct': correct,
-        'wrong_count': wrong_count,
-        'accuracy': accuracy,
-        'wrong': wrong,
-        'labels': labels,
-        'data': data,
-        'suggestion': suggestion,
-    })
+    context = {
+        "student": student,
+        "total": total,
+        "correct": correct,
+        "wrong_count": total - correct,
+        "accuracy": accuracy,
+        "wrong": wrong,
+        "labels_json": json.dumps(labels, ensure_ascii=False),
+        "data_json": json.dumps(data),
+        "has_data": bool(labels and data),
+        "suggestion": suggestion,
+    }
+
+    return render(request, "progress_report.html", context)
 
 @login_required
 def all_submissions(request):
@@ -534,63 +546,82 @@ def edit_lecture_title(request, lecture_id):
     return render(request, 'edit_lecture_title.html', {'lecture': lecture})
 
 
-
-
+from collections import defaultdict
+from django.shortcuts import render
+from django.contrib.auth.decorators import login_required
+from core.models import Student, Submission
+import json
 
 @login_required
 def progress_report(request):
-    student = get_object_or_404(Student, user=request.user)
-    submissions = Submission.objects.filter(student=student)
+    """學生端：顯示自己學習進度與圖表報告（含錯題分析）"""
 
-    # 📊 基本統計
+    # 取得目前登入學生
+    student = get_object_or_404(Student, user=request.user)
+
+    # 該學生所有作答紀錄
+    submissions = Submission.objects.filter(student=student)
     total = submissions.count()
     correct = submissions.filter(is_correct=True).count()
     wrong_count = total - correct
-    accuracy = round((correct / total * 100), 2) if total else 0
+    accuracy = round(correct / total * 100, 2) if total > 0 else 0
 
-    # ❗ 常錯題（最多五題）
+    # 各講次統計正確率
+    lecture_stats = defaultdict(lambda: {"total": 0, "correct": 0})
+    for s in submissions:
+        if s.question and s.question.lecture:
+            lec = s.question.lecture.title
+            lecture_stats[lec]["total"] += 1
+            if s.is_correct:
+                lecture_stats[lec]["correct"] += 1
+
+    labels = list(lecture_stats.keys())
+    data = [
+        round(v["correct"] / v["total"] * 100, 2)
+        for v in lecture_stats.values()
+    ]
+
+    # 🔴 錯題分析（前 5 題）
     wrong = (
-        submissions
-        .filter(is_correct=False)
-        .values('question__question_text')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:5]
+        submissions.filter(is_correct=False)
+        .values("question__question_text")
+        .annotate(count=Count("id"))
+        .order_by("-count")[:5]
     )
 
-    # 📈 講次正確率資料
-    stats = (
-        submissions
-        .values('question__lecture__title')
-        .annotate(
-            total=Count('id'),
-            correct=Count('id', filter=Q(is_correct=True))
-        )
-        .order_by('question__lecture__date')
-    )
-    labels = [s['question__lecture__title'] for s in stats]
-    data = [round(s['correct'] / s['total'] * 100, 2) for s in stats]
-
-    # 💡 學習建議
-    avg_accuracy = sum(data) / len(data) if data else 0
-    if avg_accuracy < 60:
-        suggestion = "你的整體正確率偏低，建議加強基本練習。"
-    elif avg_accuracy < 85:
-        suggestion = "表現尚可，可針對錯誤單元加強複習。"
+    # 💬 學習建議
+    if accuracy >= 90:
+        suggestion = "表現非常優異，繼續保持！"
+    elif accuracy >= 70:
+        suggestion = "表現良好，建議複習部分錯題章節以鞏固知識。"
+    elif accuracy > 0:
+        if lecture_stats:
+            weakest = min(
+                lecture_stats.items(),
+                key=lambda kv: kv[1]["correct"] / kv[1]["total"],
+            )[0]
+            suggestion = f"建議加強學習「{weakest}」單元，錯題比例較高。"
+        else:
+            suggestion = "請多練習錯誤率高的章節，加強理解。"
     else:
-        suggestion = "表現優異，請持續保持！"
+        suggestion = "目前尚無作答紀錄，請先完成練習題。"
 
-    return render(request, 'progress_report.html', {
-        'student': student,
-        'total': total,
-        'correct': correct,
-        'wrong_count': wrong_count,
-        'accuracy': accuracy,
-        'wrong': wrong,
-        'labels': labels,
-        'data': data,
-        'suggestion': suggestion,
-    })
+    # ✅ 傳給模板
+    context = {
+        "student": student,
+        "total": total,
+        "correct": correct,
+        "wrong_count": wrong_count,
+        "accuracy": accuracy,
+        "wrong": wrong,  # 加入這行讓模板可顯示錯題分析
+        "labels_json": json.dumps(labels, ensure_ascii=False),
+        "data_json": json.dumps(data),
+        "has_data": bool(labels and data),
+        "suggestion": suggestion,
+    }
 
+    return render(request, "progress_report.html", context)
+    
 
 import tempfile
 from django.http import JsonResponse
@@ -705,3 +736,49 @@ def finalize_transcript_summary_quiz(request, lecture_id):
 
     process_transcript_and_generate_quiz(lecture, num_mcq=num_mcq, num_tf=num_tf)
     return JsonResponse({"status": "ok"})
+
+
+@login_required
+def dashboard(request):
+    return render(request, 'dashboard.html')
+
+@login_required
+def my_submissions(request):
+    """學生查看自己的所有講次作答紀錄"""
+    # 取得目前登入學生
+    student = get_object_or_404(Student, user=request.user)
+
+    # 該學生所有作答紀錄
+    submissions = Submission.objects.filter(student=student).select_related('question__lecture__course')
+
+    # 統計各單元作答情況
+    summary = {}
+    for s in submissions:
+        lec = s.question.lecture
+        if lec.id not in summary:
+            summary[lec.id] = {
+                'lecture': lec,
+                'total': 0,
+                'correct': 0
+            }
+        summary[lec.id]['total'] += 1
+        if s.is_correct:
+            summary[lec.id]['correct'] += 1
+
+    # 整理結果供模板使用
+    result = []
+    for item in summary.values():
+        total = item['total']
+        correct = item['correct']
+        accuracy = round((correct / total) * 100, 2) if total > 0 else 0
+        result.append({
+            'lecture': item['lecture'],
+            'total': total,
+            'correct': correct,
+            'accuracy': accuracy
+        })
+
+    return render(request, 'student_submissions.html', {
+        'student': student,
+        'submissions': result
+    })

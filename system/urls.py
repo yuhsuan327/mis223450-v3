@@ -43,5 +43,6 @@ urlpatterns = [
     path('student/<int:student_id>/report/', views.view_student_report_by_teacher, name='teacher_student_report'),
     path("api/live_chunk_upload/", views.live_chunk_upload, name="live_chunk_upload"),
     path("api/finalize_transcript_summary_quiz/<int:lecture_id>/", views.finalize_transcript_summary_quiz, name="finalize_transcript_summary_quiz"),
-
+    path('my/submissions/', views.my_submissions, name='my_submissions'),
+    #path('progress-report/debug/', views.progress_report_debug, name='progress_report_debug'),
 ]
